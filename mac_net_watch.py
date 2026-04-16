@@ -236,6 +236,10 @@ class SessionStats:
     culprit_counts: dict[str, int] = field(default_factory=dict)
     recent_statuses: list[str] = field(default_factory=list)
     recent_events: list[str] = field(default_factory=list)
+    recent_confidence: list[float] = field(default_factory=list)
+    recent_geo_scores: list[int] = field(default_factory=list)
+    recent_dns_scores: list[int] = field(default_factory=list)
+    recent_speed_scores: list[float] = field(default_factory=list)
     completed_incidents: list[dict[str, Any]] = field(default_factory=list)
     last_snapshot: Snapshot | None = None
 
@@ -1234,13 +1238,19 @@ def print_incident_closed(incident: Incident, recovered_at: str) -> None:
     )
 
 
-def append_recent(items: list[str], value: str, limit: int) -> None:
+def append_recent(items: list[Any], value: Any, limit: int) -> None:
     items.append(value)
     if len(items) > limit:
         del items[0 : len(items) - limit]
 
 
 def record_session_sample(stats: SessionStats, snapshot: Snapshot) -> None:
+    geo_ok, geo_total = regional_health_summary(snapshot.regional_services)
+    dns_ok, dns_total = summarize_probe_counts(snapshot.system_dns)
+    speed_value = 0.0
+    if snapshot.performance and snapshot.performance.cloudflare_speed and snapshot.performance.cloudflare_speed.download_mbps:
+        speed_value = snapshot.performance.cloudflare_speed.download_mbps
+
     stats.total_samples += 1
     if snapshot.cause.status == "ok":
         stats.ok_samples += 1
@@ -1254,6 +1264,10 @@ def record_session_sample(stats: SessionStats, snapshot: Snapshot) -> None:
         f"{snapshot.timestamp[-8:]}  {snapshot.cause.status.upper():<8}  {snapshot.cause.culprit}",
         12,
     )
+    append_recent(stats.recent_confidence, snapshot.cause.confidence, 60)
+    append_recent(stats.recent_geo_scores, int((geo_ok / geo_total) * 100) if geo_total else 0, 60)
+    append_recent(stats.recent_dns_scores, int((dns_ok / dns_total) * 100) if dns_total else 0, 60)
+    append_recent(stats.recent_speed_scores, speed_value, 60)
 
 
 def close_incident(stats: SessionStats, incident: Incident, recovered_at: str) -> dict[str, Any]:
@@ -1516,18 +1530,19 @@ def draw_box(win: Any, y: int, x: int, h: int, w: int, title: str, color: int = 
     if h < 3 or w < 4:
         return
     try:
-        win.attron(curses.color_pair(color))
-        win.addch(y, x, ord("+"))
-        win.addch(y, x + w - 1, ord("+"))
-        win.addch(y + h - 1, x, ord("+"))
-        win.addch(y + h - 1, x + w - 1, ord("+"))
+        attr = curses.color_pair(color)
+        win.attron(attr)
+        win.addstr(y, x, "╭")
+        win.addstr(y, x + w - 1, "╮")
+        win.addstr(y + h - 1, x, "╰")
+        win.addstr(y + h - 1, x + w - 1, "╯")
         for col in range(x + 1, x + w - 1):
-            win.addch(y, col, ord("-"))
-            win.addch(y + h - 1, col, ord("-"))
+            win.addstr(y, col, "─")
+            win.addstr(y + h - 1, col, "─")
         for row in range(y + 1, y + h - 1):
-            win.addch(row, x, ord("|"))
-            win.addch(row, x + w - 1, ord("|"))
-        win.attroff(curses.color_pair(color))
+            win.addstr(row, x, "│")
+            win.addstr(row, x + w - 1, "│")
+        win.attroff(attr)
     except curses.error:
         return
 
@@ -1570,114 +1585,12 @@ def sparkline(statuses: list[str], width: int) -> str:
     if width <= 0:
         return ""
     symbols = {
-        "ok": ".",
-        "degraded": "!",
-        "down": "X",
+        "ok": "•",
+        "degraded": "▲",
+        "down": "✕",
     }
     tail = statuses[-width:]
     return "".join(symbols.get(item, "?") for item in tail).rjust(width)
-
-
-def draw_header(stdscr: Any, width: int, snapshot: Snapshot, stats: SessionStats) -> None:
-    label = status_label(snapshot.cause.status)
-    attr = curses.color_pair(status_color(snapshot.cause.status)) | curses.A_BOLD
-    safe_addstr(stdscr, 0, 2, "MAC NET WATCH", curses.color_pair(COLOR_ACCENT) | curses.A_BOLD)
-    safe_addstr(stdscr, 0, 18, f"{label}", attr)
-    safe_addstr(stdscr, 0, 25, f"виновник: {snapshot.cause.culprit}", curses.color_pair(COLOR_DEFAULT) | curses.A_BOLD)
-    safe_addstr(stdscr, 0, max(2, width - 28), snapshot.timestamp, curses.color_pair(COLOR_MUTED))
-    safe_addstr(stdscr, 1, 2, sparkline(stats.recent_statuses, max(10, width - 4)), curses.color_pair(COLOR_MUTED))
-
-
-def draw_overview(stdscr: Any, y: int, x: int, h: int, w: int, snapshot: Snapshot, stats: SessionStats) -> None:
-    draw_box(stdscr, y, x, h, w, "Сводка", COLOR_ACCENT)
-    body_x = x + 2
-    row = y + 1
-
-    safe_addstr(
-        stdscr,
-        row,
-        body_x,
-        f"Статус: {status_label(snapshot.cause.status)}   Confidence: {snapshot.cause.confidence:.2f}",
-        curses.color_pair(status_color(snapshot.cause.status)) | curses.A_BOLD,
-    )
-    row += 1
-    safe_addstr(stdscr, row, body_x, f"Главный вывод: {snapshot.cause.summary}", curses.color_pair(COLOR_DEFAULT))
-    row += 2
-    safe_addstr(stdscr, row, body_x, f"Доминирующий виновник за сессию: {dominant_session_culprit(stats)}", curses.A_BOLD)
-    row += 1
-    safe_addstr(
-        stdscr,
-        row,
-        body_x,
-        f"Сэмплы: {stats.total_samples}   OK: {stats.ok_samples}   WARN/DOWN: {stats.degraded_samples}",
-        curses.color_pair(COLOR_DEFAULT),
-    )
-    row += 1
-    safe_addstr(
-        stdscr,
-        row,
-        body_x,
-        f"Инциденты: открыто {stats.incidents_opened}   закрыто {stats.incidents_closed}",
-        curses.color_pair(COLOR_DEFAULT),
-    )
-    row += 2
-    safe_addstr(stdscr, row, body_x, "Рекомендации:", curses.A_BOLD)
-    row += 1
-    available_lines = max(0, y + h - row - 1)
-    for step in snapshot.cause.next_steps[:available_lines]:
-        row += draw_wrapped(stdscr, row, body_x, w - 4, f"- {step}", curses.color_pair(COLOR_DEFAULT), max_lines=2)
-
-
-def draw_network(stdscr: Any, y: int, x: int, h: int, w: int, snapshot: Snapshot) -> None:
-    draw_box(stdscr, y, x, h, w, "Сеть", COLOR_DEFAULT)
-    row = y + 1
-    body_x = x + 2
-
-    interface = snapshot.interface
-    safe_addstr(stdscr, row, body_x, f"Active default: {format_route(snapshot.active_default)}", curses.A_BOLD)
-    row += 1
-    safe_addstr(stdscr, row, body_x, f"Local default:  {format_route(snapshot.local_default)}")
-    row += 1
-    safe_addstr(stdscr, row, body_x, f"DNS servers:    {summarize_dns_servers(snapshot)}")
-    row += 2
-
-    if interface is not None:
-        safe_addstr(stdscr, row, body_x, f"Interface: {interface.name} ({interface.status})", curses.A_BOLD)
-        row += 1
-        safe_addstr(stdscr, row, body_x, f"IPv4: {', '.join(interface.ipv4) or 'none'}")
-        row += 1
-        safe_addstr(stdscr, row, body_x, f"MAC:  {interface.mac or 'unknown'}")
-        row += 2
-
-    safe_addstr(stdscr, row, body_x, f"Gateway probe: {one_line_probe_summary(snapshot.gateway_probe)}")
-    row += 1
-    safe_addstr(stdscr, row, body_x, f"ARP gateway:   {'yes' if snapshot.arp_has_gateway else 'no'}")
-    row += 2
-
-    if snapshot.performance is not None and row < y + h - 1:
-        rates = snapshot.performance.interface_rates
-        speed = snapshot.performance.cloudflare_speed
-        if rates is not None:
-            safe_addstr(
-                stdscr,
-                row,
-                body_x,
-                f"RX/TX: {format_mbps(rates.rx_mbps)} / {format_mbps(rates.tx_mbps)}",
-                curses.A_BOLD,
-            )
-            row += 1
-        if speed is not None and row < y + h - 1:
-            detail = format_mbps(speed.download_mbps) if speed.ok else (speed.error or "fail")
-            safe_addstr(stdscr, row, body_x, f"Cloudflare: {detail}", curses.A_BOLD)
-            row += 1
-            safe_addstr(
-                stdscr,
-                row,
-                body_x,
-                f"TTFB {format_latency(speed.ttfb_ms)}  bytes {speed.transferred_bytes}",
-            )
-        elif snapshot.performance.speedtest_running and row < y + h - 1:
-            safe_addstr(stdscr, row, body_x, "Cloudflare: running...", curses.color_pair(COLOR_WARN) | curses.A_BOLD)
 
 
 def compact_counts(successes: int, total: int) -> str:
@@ -1692,131 +1605,273 @@ def regional_service_status_text(service: RegionalServiceProbe) -> str:
     return service.error or "fail"
 
 
-def draw_checks(stdscr: Any, y: int, x: int, h: int, w: int, snapshot: Snapshot) -> None:
-    draw_box(stdscr, y, x, h, w, "Проверки", COLOR_DEFAULT)
-    body_x = x + 2
-    row = y + 1
+def numeric_sparkline(values: list[float], width: int, ceiling: float | None = None) -> str:
+    if width <= 0:
+        return ""
+    glyphs = "▁▂▃▄▅▆▇█"
+    tail = values[-width:]
+    prepared = [max(0.0, float(item)) for item in tail]
+    if not prepared:
+        return ""
+    max_value = ceiling if ceiling is not None else max(prepared)
+    if max_value <= 0:
+        return "·" * len(prepared)
+    output = []
+    for value in prepared:
+        index = min(len(glyphs) - 1, int(round((value / max_value) * (len(glyphs) - 1))))
+        output.append(glyphs[index])
+    return "".join(output).rjust(width)
 
+
+def clip_text(text: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    if len(text) <= width:
+        return text
+    if width <= 1:
+        return text[:width]
+    return text[: width - 1] + "…"
+
+
+def status_icon(status: str) -> str:
+    return {
+        "ok": "●",
+        "degraded": "▲",
+        "down": "✕",
+    }.get(status, "•")
+
+
+def progress_bar(value: int, total: int, width: int) -> str:
+    width = max(4, width)
+    if total <= 0:
+        return "░" * width
+    filled = int(round((value / total) * width))
+    filled = max(0, min(width, filled))
+    return ("█" * filled) + ("░" * (width - filled))
+
+
+def ratio_percent(value: int, total: int) -> int:
+    if total <= 0:
+        return 0
+    return int(round((value / total) * 100))
+
+
+def group_regional_services(probes: list[RegionalServiceProbe]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for probe in probes:
+        item = grouped.setdefault(
+            probe.region,
+            {"region": probe.region, "ok": 0, "total": 0, "services": [], "latencies": []},
+        )
+        item["total"] += 1
+        if probe.ok:
+            item["ok"] += 1
+            if probe.latency_ms is not None:
+                item["latencies"].append(probe.latency_ms)
+        item["services"].append(probe)
+
+    rows = []
+    for region, item in grouped.items():
+        avg_latency = round(sum(item["latencies"]) / len(item["latencies"]), 1) if item["latencies"] else None
+        rows.append(
+            {
+                "region": region,
+                "ok": item["ok"],
+                "total": item["total"],
+                "avg_latency_ms": avg_latency,
+                "services": item["services"],
+            }
+        )
+    return rows
+
+
+def health_rows(snapshot: Snapshot) -> list[dict[str, Any]]:
     public_ok, public_total = summarize_probe_counts(snapshot.public_probes, "reachable")
     system_dns_ok, system_dns_total = summarize_probe_counts(snapshot.system_dns)
     direct_dns_ok, direct_dns_total = summarize_probe_counts(snapshot.direct_dns)
     http_ok, http_total = summarize_probe_counts(snapshot.http_probes)
-
-    safe_addstr(stdscr, row, body_x, f"External IP    {compact_counts(public_ok, public_total)}", curses.A_BOLD)
-    row += 1
-    for probe in snapshot.public_probes[: max(0, h - 12)]:
-        color = status_color("ok" if probe.reachable else "down")
-        safe_addstr(
-            stdscr,
-            row,
-            body_x,
-            f"{probe.target:<15} {one_line_probe_summary(probe)}",
-            curses.color_pair(color),
-        )
-        row += 1
-
-    row += 1
-    safe_addstr(stdscr, row, body_x, f"System DNS     {compact_counts(system_dns_ok, system_dns_total)}", curses.A_BOLD)
-    row += 1
-    for probe in snapshot.system_dns[:2]:
-        color = status_color("ok" if probe.ok else "down")
-        detail = format_latency(probe.latency_ms) if probe.ok else (probe.error or "fail")
-        safe_addstr(stdscr, row, body_x, f"{probe.name:<15} {detail}", curses.color_pair(color))
-        row += 1
-
-    safe_addstr(stdscr, row, body_x, f"Direct DNS     {compact_counts(direct_dns_ok, direct_dns_total)}", curses.A_BOLD)
-    row += 1
-    for probe in snapshot.direct_dns[:2]:
-        color = status_color("ok" if probe.ok else "down")
-        detail = format_latency(probe.latency_ms) if probe.ok else (probe.error or "fail")
-        safe_addstr(stdscr, row, body_x, f"{probe.server:<15} {detail}", curses.color_pair(color))
-        row += 1
-
-    safe_addstr(stdscr, row, body_x, f"HTTP           {compact_counts(http_ok, http_total)}", curses.A_BOLD)
-    row += 1
-    for probe in snapshot.http_probes[:2]:
-        color = status_color("ok" if probe.ok else "down")
-        detail = format_latency(probe.latency_ms) if probe.ok else (probe.error or "fail")
-        safe_addstr(stdscr, row, body_x, f"{probe.url[:15]:<15} {detail}", curses.color_pair(color))
-        row += 1
+    geo_ok, geo_total = regional_health_summary(snapshot.regional_services)
+    gateway_ok = 1 if snapshot.gateway_probe and snapshot.gateway_probe.reachable else 0
+    gateway_total = 1 if snapshot.gateway_probe is not None else 0
+    return [
+        {"label": "Gateway", "ok": gateway_ok, "total": gateway_total, "detail": one_line_probe_summary(snapshot.gateway_probe)},
+        {"label": "External IP", "ok": public_ok, "total": public_total, "detail": compact_counts(public_ok, public_total)},
+        {"label": "System DNS", "ok": system_dns_ok, "total": system_dns_total, "detail": compact_counts(system_dns_ok, system_dns_total)},
+        {"label": "Direct DNS", "ok": direct_dns_ok, "total": direct_dns_total, "detail": compact_counts(direct_dns_ok, direct_dns_total)},
+        {"label": "HTTP", "ok": http_ok, "total": http_total, "detail": compact_counts(http_ok, http_total)},
+        {"label": "Geo", "ok": geo_ok, "total": geo_total, "detail": compact_counts(geo_ok, geo_total)},
+    ]
 
 
-def draw_events(stdscr: Any, y: int, x: int, h: int, w: int, stats: SessionStats) -> None:
-    draw_box(stdscr, y, x, h, w, "Лента", COLOR_DEFAULT)
+def metric_card(stdscr: Any, y: int, x: int, h: int, w: int, title: str, value: str, subtitle: str, status: str) -> None:
+    color = status_color(status)
+    draw_box(stdscr, y, x, h, w, title, color)
+    safe_addstr(stdscr, y + 1, x + 2, value, curses.color_pair(color) | curses.A_BOLD)
+    safe_addstr(stdscr, y + 2, x + 2, clip_text(subtitle, w - 4), curses.color_pair(COLOR_DEFAULT))
+
+
+def draw_header(stdscr: Any, width: int, snapshot: Snapshot, stats: SessionStats) -> None:
+    label = status_label(snapshot.cause.status)
+    attr = curses.color_pair(status_color(snapshot.cause.status)) | curses.A_BOLD
+    geo_ok, geo_total = regional_health_summary(snapshot.regional_services)
+    safe_addstr(stdscr, 0, 2, "MAC NET WATCH", curses.color_pair(COLOR_ACCENT) | curses.A_BOLD)
+    safe_addstr(stdscr, 0, 18, f"{status_icon(snapshot.cause.status)} {label}", attr)
+    safe_addstr(stdscr, 0, 30, f"Причина: {clip_text(snapshot.cause.culprit, max(10, width - 62))}", curses.A_BOLD)
+    safe_addstr(stdscr, 0, max(2, width - 27), snapshot.timestamp, curses.color_pair(COLOR_MUTED))
+    safe_addstr(
+        stdscr,
+        1,
+        2,
+        f"Сессия {stats.total_samples} samples  •  Geo {geo_ok}/{geo_total}  •  Confidence {snapshot.cause.confidence:.2f}  •  {sparkline(stats.recent_statuses, max(12, width - 78))}",
+        curses.color_pair(COLOR_MUTED),
+    )
+
+
+def draw_metric_cards(stdscr: Any, y: int, width: int, snapshot: Snapshot, stats: SessionStats) -> None:
+    geo_ok, geo_total = regional_health_summary(snapshot.regional_services)
+    dns_ok, dns_total = summarize_probe_counts(snapshot.system_dns)
+    public_ok, public_total = summarize_probe_counts(snapshot.public_probes, "reachable")
+    speed = snapshot.performance.cloudflare_speed if snapshot.performance else None
+    speed_value = format_mbps(speed.download_mbps) if speed and speed.ok else ("running…" if snapshot.performance and snapshot.performance.speedtest_running else "n/a")
+
+    cards = [
+        ("Overall", status_label(snapshot.cause.status), snapshot.cause.culprit, snapshot.cause.status),
+        ("External", compact_counts(public_ok, public_total), "Reachability to public IPs", "ok" if public_total and public_ok == public_total else ("degraded" if public_ok else "down")),
+        ("DNS", compact_counts(dns_ok, dns_total), "System resolver health", "ok" if dns_total and dns_ok == dns_total else ("degraded" if dns_ok else "down")),
+        ("Geo", compact_counts(geo_ok, geo_total), "Regional service availability", "ok" if geo_total and geo_ok == geo_total else ("degraded" if geo_ok else "down")),
+        ("Speed", speed_value, "Cloudflare edge download", "ok" if speed and speed.ok else ("degraded" if snapshot.performance and snapshot.performance.speedtest_running else "down")),
+    ]
+
+    card_w = max(18, width // len(cards))
+    for index, (title, value, subtitle, status) in enumerate(cards):
+        x = index * card_w
+        w = card_w if index < len(cards) - 1 else width - x
+        metric_card(stdscr, y, x, 4, w, title, value, subtitle, status)
+
+
+def draw_story_panel(stdscr: Any, y: int, x: int, h: int, w: int, snapshot: Snapshot, stats: SessionStats, active_incident: Incident | None) -> None:
+    draw_box(stdscr, y, x, h, w, "Ситуация", COLOR_ACCENT)
     row = y + 1
     body_x = x + 2
-    for item in stats.recent_events[-max(0, h - 2):]:
-        safe_addstr(stdscr, row, body_x, item)
+    safe_addstr(stdscr, row, body_x, f"{status_icon(snapshot.cause.status)} {snapshot.cause.summary}", curses.color_pair(status_color(snapshot.cause.status)) | curses.A_BOLD)
+    row += 2
+    safe_addstr(stdscr, row, body_x, f"Вероятный виновник: {snapshot.cause.culprit}", curses.A_BOLD)
+    row += 1
+    safe_addstr(stdscr, row, body_x, f"Доминирующий виновник по сессии: {dominant_session_culprit(stats)}")
+    row += 1
+    if active_incident is not None:
+        duration = incident_duration_seconds(active_incident.started_at, snapshot.timestamp)
+        safe_addstr(stdscr, row, body_x, f"Активный инцидент: {duration:.0f}s", curses.color_pair(COLOR_WARN) | curses.A_BOLD)
+    elif stats.completed_incidents:
+        last = stats.completed_incidents[-1]
+        safe_addstr(stdscr, row, body_x, f"Последний инцидент: {last['dominant_culprit']} ({last['duration_seconds']:.0f}s)", curses.color_pair(COLOR_OK))
+    row += 2
+    safe_addstr(stdscr, row, body_x, "Почему так решили:", curses.A_BOLD)
+    row += 1
+    for item in snapshot.cause.evidence[: max(1, h - 11)]:
+        row += draw_wrapped(stdscr, row, body_x, w - 4, f"• {item}", max_lines=2)
+    if row < y + h - 2:
         row += 1
+        safe_addstr(stdscr, row, body_x, "Следующий шаг:", curses.A_BOLD)
+        row += 1
+        if snapshot.cause.next_steps:
+            draw_wrapped(stdscr, row, body_x, w - 4, f"→ {snapshot.cause.next_steps[0]}", max_lines=2)
+
+
+def draw_health_matrix(stdscr: Any, y: int, x: int, h: int, w: int, snapshot: Snapshot) -> None:
+    draw_box(stdscr, y, x, h, w, "Health Matrix", COLOR_DEFAULT)
+    row = y + 1
+    body_x = x + 2
+    bar_w = max(8, w - 27)
+    for item in health_rows(snapshot)[: max(0, h - 2)]:
+        percent = ratio_percent(item["ok"], item["total"])
+        status = "ok" if item["total"] and item["ok"] == item["total"] else ("degraded" if item["ok"] else "down")
+        safe_addstr(stdscr, row, body_x, f"{item['label']:<11}", curses.A_BOLD)
+        safe_addstr(stdscr, row, body_x + 12, progress_bar(item["ok"], max(1, item["total"]), bar_w), curses.color_pair(status_color(status)))
+        safe_addstr(stdscr, row, body_x + 13 + bar_w, f"{percent:>3}%", curses.color_pair(status_color(status)) | curses.A_BOLD)
+        row += 1
+    if row < y + h - 1:
+        row += 1
+        safe_addstr(stdscr, row, body_x, f"DNS servers: {clip_text(summarize_dns_servers(snapshot), w - 4)}")
+
+
+def draw_network_panel(stdscr: Any, y: int, x: int, h: int, w: int, snapshot: Snapshot, stats: SessionStats) -> None:
+    draw_box(stdscr, y, x, h, w, "Network & Flow", COLOR_DEFAULT)
+    row = y + 1
+    body_x = x + 2
+    interface = snapshot.interface
+    safe_addstr(stdscr, row, body_x, f"Route: {clip_text(format_route(snapshot.local_default), w - 10)}", curses.A_BOLD)
+    row += 1
+    safe_addstr(stdscr, row, body_x, f"Active: {clip_text(format_route(snapshot.active_default), w - 10)}")
+    row += 1
+    if interface is not None:
+        safe_addstr(stdscr, row, body_x, f"Interface: {interface.name}  IPv4 {','.join(interface.ipv4) or 'none'}")
+        row += 1
+    safe_addstr(stdscr, row, body_x, f"Gateway: {one_line_probe_summary(snapshot.gateway_probe)}  ARP {'yes' if snapshot.arp_has_gateway else 'no'}")
+    row += 2
+
+    if snapshot.performance is not None:
+        rates = snapshot.performance.interface_rates
+        speed = snapshot.performance.cloudflare_speed
+        safe_addstr(stdscr, row, body_x, "Traffic now", curses.A_BOLD)
+        row += 1
+        if rates is not None:
+            safe_addstr(stdscr, row, body_x, f"RX {format_mbps(rates.rx_mbps)}   TX {format_mbps(rates.tx_mbps)}", curses.color_pair(COLOR_ACCENT) | curses.A_BOLD)
+            row += 1
+        else:
+            safe_addstr(stdscr, row, body_x, "RX/TX: waiting for next sample", curses.color_pair(COLOR_MUTED))
+            row += 1
+        if row < y + h - 4:
+            safe_addstr(stdscr, row, body_x, f"Cloudflare edge: {format_mbps(speed.download_mbps) if speed and speed.ok else ('running…' if snapshot.performance.speedtest_running else 'n/a')}", curses.A_BOLD)
+            row += 1
+            if speed is not None:
+                safe_addstr(stdscr, row, body_x, f"TTFB {format_latency(speed.ttfb_ms)}   bytes {speed.transferred_bytes}   age {clip_text(str(int(speedtest_age_seconds(snapshot.timestamp, speed) or 0)) + 's', 12)}")
+                row += 1
+
+    if row < y + h - 3:
+        row += 1
+        safe_addstr(stdscr, row, body_x, f"Speed trend  {numeric_sparkline(stats.recent_speed_scores, max(10, w - 16))}", curses.color_pair(COLOR_MUTED))
+        row += 1
+        safe_addstr(stdscr, row, body_x, f"Geo trend    {numeric_sparkline([float(v) for v in stats.recent_geo_scores], max(10, w - 16), 100)}", curses.color_pair(COLOR_MUTED))
 
 
 def draw_regional_services(stdscr: Any, y: int, x: int, h: int, w: int, snapshot: Snapshot) -> None:
-    draw_box(stdscr, y, x, h, w, "Гео сервисы", COLOR_DEFAULT)
-    body_x = x + 2
+    draw_box(stdscr, y, x, h, w, "Geo Reachability", COLOR_DEFAULT)
     row = y + 1
-    ok_count, total_count = regional_health_summary(snapshot.regional_services)
-    safe_addstr(stdscr, row, body_x, f"Доступность регионов: {ok_count}/{total_count}", curses.A_BOLD)
-    row += 1
-
-    max_rows = max(0, h - 3)
-    for service in snapshot.regional_services[:max_rows]:
-        color = status_color("ok" if service.ok else "down")
-        label = f"{service.code:<2} {service.region:<14}"
-        detail = f"{service.name:<12} {regional_service_status_text(service)}"
+    body_x = x + 2
+    groups = group_regional_services(snapshot.regional_services)
+    for group in groups[: max(0, h - 2)]:
+        percent = ratio_percent(group["ok"], group["total"])
+        status = "ok" if group["ok"] == group["total"] else ("degraded" if group["ok"] else "down")
+        safe_addstr(stdscr, row, body_x, f"{clip_text(group['region'], 14):<14}", curses.A_BOLD)
+        safe_addstr(stdscr, row, body_x + 15, progress_bar(group["ok"], max(1, group["total"]), 8), curses.color_pair(status_color(status)))
+        latency = format_latency(group["avg_latency_ms"]) if group["avg_latency_ms"] is not None else "—"
+        safe_addstr(stdscr, row, body_x + 25, f"{group['ok']}/{group['total']}  {latency}", curses.color_pair(status_color(status)))
+        row += 1
+    if row < y + h - 1:
+        row += 1
+    for service in snapshot.regional_services[: max(0, y + h - row - 1)]:
+        color = curses.color_pair(status_color("ok" if service.ok else "down"))
+        label = f"{service.code:<3} {clip_text(service.name, 12):<12}"
+        detail = clip_text(regional_service_status_text(service), max(10, w - 22))
         safe_addstr(stdscr, row, body_x, label, curses.A_BOLD)
-        safe_addstr(stdscr, row, body_x + min(18, w - 4), detail, curses.color_pair(color))
+        safe_addstr(stdscr, row, body_x + 17, detail, color)
         row += 1
 
 
-def draw_analysis(stdscr: Any, y: int, x: int, h: int, w: int, snapshot: Snapshot, stats: SessionStats, active_incident: Incident | None) -> None:
-    draw_box(stdscr, y, x, h, w, "Анализ", COLOR_DEFAULT)
-    body_x = x + 2
+def draw_timeline_panel(stdscr: Any, y: int, x: int, h: int, w: int, stats: SessionStats, snapshot: Snapshot) -> None:
+    draw_box(stdscr, y, x, h, w, "Timeline", COLOR_DEFAULT)
     row = y + 1
-
-    safe_addstr(stdscr, row, body_x, f"Вероятный виновник: {snapshot.cause.culprit}", curses.A_BOLD)
+    body_x = x + 2
+    safe_addstr(stdscr, row, body_x, f"Status  {sparkline(stats.recent_statuses, max(10, w - 12))}", curses.color_pair(COLOR_MUTED))
     row += 1
-    safe_addstr(stdscr, row, body_x, f"Текущий код: {snapshot.cause.code}")
+    safe_addstr(stdscr, row, body_x, f"Geo     {numeric_sparkline([float(v) for v in stats.recent_geo_scores], max(10, w - 12), 100)}", curses.color_pair(COLOR_MUTED))
+    row += 1
+    safe_addstr(stdscr, row, body_x, f"DNS     {numeric_sparkline([float(v) for v in stats.recent_dns_scores], max(10, w - 12), 100)}", curses.color_pair(COLOR_MUTED))
     row += 2
-
-    safe_addstr(stdscr, row, body_x, "Основания:", curses.A_BOLD)
-    row += 1
-    evidence_room = max(0, h - 9)
-    used = 0
-    for item in snapshot.cause.evidence[:3]:
-        if used >= evidence_room:
-            break
-        used_lines = draw_wrapped(stdscr, row, body_x, w - 4, f"- {item}", max_lines=2)
-        row += used_lines
-        used += used_lines
-
-    if active_incident is not None and row < y + h - 5:
+    for item in stats.recent_events[: max(0, h - 6)]:
+        safe_addstr(stdscr, row, body_x, clip_text(item, w - 4))
         row += 1
-        duration = incident_duration_seconds(active_incident.started_at, snapshot.timestamp)
-        safe_addstr(
-            stdscr,
-            row,
-            body_x,
-            f"Текущий инцидент: {duration:.0f}s, основной виновник {dominant_culprit(active_incident)}",
-            curses.color_pair(COLOR_WARN) | curses.A_BOLD,
-        )
-    elif stats.completed_incidents and row < y + h - 5:
-        last = stats.completed_incidents[-1]
-        row += 1
-        safe_addstr(
-            stdscr,
-            row,
-            body_x,
-            f"Последний закрытый: {last['dominant_culprit']} ({last['duration_seconds']:.0f}s)",
-            curses.color_pair(COLOR_OK),
-        )
-
-    if row < y + h - 3:
-        row += 2
-        safe_addstr(stdscr, row, body_x, "Последние события:", curses.A_BOLD)
-        row += 1
-        for item in stats.recent_events[-max(0, y + h - row - 1):]:
-            safe_addstr(stdscr, row, body_x, item)
-            row += 1
 
 
 def draw_footer(stdscr: Any, width: int, args: argparse.Namespace) -> None:
@@ -1824,45 +1879,42 @@ def draw_footer(stdscr: Any, width: int, args: argparse.Namespace) -> None:
         stdscr,
         curses.LINES - 1,
         2,
-        f"q: выход   interval={args.interval}s   timeout={args.timeout}s   log={args.log_file or 'off'}",
+        f"q quit  •  interval {args.interval}s  •  timeout {args.timeout}s  •  speedtest {args.speedtest_interval}s  •  log {args.log_file or 'off'}",
         curses.color_pair(COLOR_MUTED),
     )
-    safe_addstr(
-        stdscr,
-        curses.LINES - 1,
-        max(2, width - 36),
-        "plain: --plain   json: --json",
-        curses.color_pair(COLOR_MUTED),
-    )
+    safe_addstr(stdscr, curses.LINES - 1, max(2, width - 25), "plain --plain  json --json", curses.color_pair(COLOR_MUTED))
 
 
 def render_dashboard(stdscr: Any, snapshot: Snapshot, stats: SessionStats, active_incident: Incident | None, args: argparse.Namespace) -> None:
     stdscr.erase()
     height, width = stdscr.getmaxyx()
 
-    if height < 26 or width < 90:
-        safe_addstr(stdscr, 1, 2, "Терминал слишком маленький для интерфейса.", curses.color_pair(COLOR_DOWN) | curses.A_BOLD)
-        safe_addstr(stdscr, 3, 2, "Нужно минимум 90x26. Увеличьте окно или запустите с --plain.")
+    if height < 30 or width < 110:
+        safe_addstr(stdscr, 1, 2, "Терминал слишком маленький для выразительного интерфейса.", curses.color_pair(COLOR_DOWN) | curses.A_BOLD)
+        safe_addstr(stdscr, 3, 2, "Нужно минимум 110x30. Увеличьте окно или запустите с --plain.")
         draw_footer(stdscr, width, args)
         stdscr.refresh()
         return
 
     draw_header(stdscr, width, snapshot, stats)
+    draw_metric_cards(stdscr, 3, width, snapshot, stats)
 
-    top_y = 3
-    top_h = 12
+    top_y = 8
+    top_h = 11
     left_w = width // 2
-    right_w = width - left_w
+    mid_w = width // 4
+    right_w = width - left_w - mid_w
 
-    draw_overview(stdscr, top_y, 0, top_h, left_w, snapshot, stats)
-    draw_network(stdscr, top_y, left_w, top_h, right_w, snapshot)
+    draw_story_panel(stdscr, top_y, 0, top_h, left_w, snapshot, stats, active_incident)
+    draw_health_matrix(stdscr, top_y, left_w, top_h, mid_w, snapshot)
+    draw_regional_services(stdscr, top_y, left_w + mid_w, top_h, right_w, snapshot)
 
     bottom_y = top_y + top_h
     bottom_h = height - bottom_y - 1
-    col_w = width // 3
-    draw_checks(stdscr, bottom_y, 0, bottom_h, col_w, snapshot)
-    draw_regional_services(stdscr, bottom_y, col_w, bottom_h, col_w, snapshot)
-    draw_analysis(stdscr, bottom_y, col_w * 2, bottom_h, width - col_w * 2, snapshot, stats, active_incident)
+    bottom_left_w = width * 3 // 5
+    bottom_right_w = width - bottom_left_w
+    draw_network_panel(stdscr, bottom_y, 0, bottom_h, bottom_left_w, snapshot, stats)
+    draw_timeline_panel(stdscr, bottom_y, bottom_left_w, bottom_h, bottom_right_w, stats, snapshot)
 
     draw_footer(stdscr, width, args)
     stdscr.refresh()

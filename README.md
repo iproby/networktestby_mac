@@ -39,10 +39,10 @@
 ./install_and_run.sh
 ```
 
-После публикации на GitHub это можно будет запускать так:
+После публикации на GitHub это запускается так:
 
 ```bash
-git clone <YOUR_GITHUB_REPO_URL> mac-net-watch && cd mac-net-watch && ./install_and_run.sh
+git clone https://github.com/iproby/networktestby_mac.git mac-net-watch && cd mac-net-watch && ./install_and_run.sh
 ```
 
 Полноэкранный интерфейс:

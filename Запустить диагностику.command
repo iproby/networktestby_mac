@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PYTHON_BIN=""
+cd "$SCRIPT_DIR"
 
 print_header() {
   if [ -t 1 ]; then
@@ -14,42 +14,30 @@ print_header() {
   echo
 }
 
-find_python() {
-  if command -v python3 >/dev/null 2>&1; then
-    PYTHON_BIN="$(command -v python3)"
-    return 0
-  fi
-  return 1
-}
-
-install_python_with_brew() {
-  if ! command -v brew >/dev/null 2>&1; then
-    return 1
-  fi
-
-  echo "python3 не найден. Устанавливаю через Homebrew..."
-  brew install python
-  find_python
-}
-
 print_header
 
-if ! find_python; then
-  if ! install_python_with_brew; then
-    echo "Не удалось автоматически найти или установить python3."
-    echo
-    echo "Что нужно сделать:"
-    echo "1. Установить Homebrew с https://brew.sh"
-    echo "2. Повторно запустить этот файл"
-    echo
+if [[ ! -f "$SCRIPT_DIR/mac_net_watch.py" ]]; then
+  echo "Не найден mac_net_watch.py рядом с этим файлом."
+  echo "Клонируйте репозиторий целиком и запускайте лаунчер из папки проекта."
+  echo
+  if [ -t 0 ]; then
     read "?Нажмите Enter для выхода..."
-    exit 1
   fi
+  exit 1
 fi
 
-echo "Python: $PYTHON_BIN"
-echo "Стартую интерфейс диагностики..."
-echo
-sleep 1
+chmod +x "$SCRIPT_DIR/install_and_run.sh" >/dev/null 2>&1 || true
 
-exec "$PYTHON_BIN" "$SCRIPT_DIR/mac_net_watch.py"
+set +e
+"$SCRIPT_DIR/install_and_run.sh" "$@"
+status=$?
+set -e
+
+if [ "$status" -ne 0 ]; then
+  echo
+  echo "Запуск завершился с кодом $status."
+  if [ -t 0 ]; then
+    read "?Нажмите Enter для выхода..."
+  fi
+fi
+exit "$status"

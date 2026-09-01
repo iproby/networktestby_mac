@@ -17,19 +17,26 @@
 
 ## Самый простой запуск
 
-Запуск двойным кликом:
+Запуск двойным кликом из папки проекта (после `git clone` или скачивания ZIP):
 
-- [Запустить диагностику.command](/Users/mac_1/Documents/Codex/Games%20for%20mac/Запустить%20диагностику.command)
-- [start_diagnostics.command](/Users/mac_1/Documents/Codex/Games%20for%20mac/start_diagnostics.command)
-- [install_and_run.sh](/Users/mac_1/Documents/Codex/Games%20for%20mac/install_and_run.sh)
+- [Запустить диагностику.command](Запустить%20диагностику.command)
+- [start_diagnostics.command](start_diagnostics.command)
+- [install_and_run.sh](install_and_run.sh)
 
 Что делает `*.command`:
 
-1. проверяет, есть ли `python3`;
-2. если `python3` нет, пытается поставить его через `brew install python`;
-3. запускает красивый интерфейс диагностики.
+1. проверяет, что `mac_net_watch.py` лежит рядом, а не в старом абсолютном пути на другом Mac;
+2. ищет рабочий `python3` 3.9+ (в том числе Homebrew), а не заглушку Xcode;
+3. если `python3` нет, пытается поставить его через `brew install python`;
+4. запускает интерфейс диагностики.
 
-Если на Mac нет и `python3`, и `Homebrew`, файл остановится и подскажет, что нужно поставить Homebrew.
+Если на Mac нет и `python3`, и Homebrew, файл остановится и подскажет, что нужно поставить Homebrew или Command Line Tools.
+
+Если Finder не открывает `*.command` после клона, выдайте права на запуск:
+
+```bash
+chmod +x install_and_run.sh start_diagnostics.command "Запустить диагностику.command"
+```
 
 ## Запуск из терминала
 
@@ -39,10 +46,10 @@
 ./install_and_run.sh
 ```
 
-После публикации на GitHub это запускается так:
+После клонирования с GitHub:
 
 ```bash
-git clone https://github.com/iproby/networktestby_mac.git mac-net-watch && cd mac-net-watch && ./install_and_run.sh
+git clone https://github.com/iproby/networktestby_mac.git mac-net-watch && cd mac-net-watch && chmod +x install_and_run.sh && ./install_and_run.sh
 ```
 
 Полноэкранный интерфейс:
@@ -221,7 +228,7 @@ python3 mac_net_watch.py --interval 5
 
 Или просто откройте:
 
-- [Запустить диагностику.command](/Users/mac_1/Documents/Codex/Games%20for%20mac/Запустить%20диагностику.command)
+- [Запустить диагностику.command](Запустить%20диагностику.command)
 
 Оставьте окно работать до очередного обрыва. Когда проблема проявится, интерфейс покажет:
 

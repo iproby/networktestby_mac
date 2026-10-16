@@ -3,3 +3,10 @@ __pycache__/
 *.pyo
 .DS_Store
 network-diagnostics.jsonl
+.venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.netwatch-state/
+*.svg

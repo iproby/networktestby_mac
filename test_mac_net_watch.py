@@ -175,7 +175,8 @@ class AssessmentTest(unittest.TestCase):
 
     def test_gateway_unreachable(self) -> None:
         cause = mn.build_assessment(
-            _snapshot(gateway_probe=_probe("192.168.1.1", False), arp_has_gateway=False)
+            _snapshot(gateway_probe=_probe("192.168.1.1", False), arp_has_gateway=False,
+                      public_probes=[_probe("1.1.1.1", False)], http_probes=[_http(False)])
         )
         self.assertEqual(cause.code, "gateway_unreachable")
         self.assertEqual(cause.status, "down")
@@ -193,7 +194,8 @@ class AssessmentTest(unittest.TestCase):
 
     def test_upstream_wan_failure(self) -> None:
         cause = mn.build_assessment(
-            _snapshot(public_probes=[_probe("1.1.1.1", False), _probe("8.8.8.8", False)])
+            _snapshot(public_probes=[_probe("1.1.1.1", False), _probe("8.8.8.8", False)],
+                      http_probes=[_http(False)])
         )
         self.assertEqual(cause.code, "upstream_wan_failure")
 

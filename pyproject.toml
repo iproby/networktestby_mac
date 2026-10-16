@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "networktestby-netwatch"
+version = "3.0.0"
+description = "Explainable cross-platform network diagnostics with a live terminal dashboard"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["textual==1.0.0", "psutil==7.2.2"]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10", "pytest-asyncio>=0.24,<2"]
+
+[project.scripts]
+netwatch = "netwatch.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["netwatch*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests", "test_mac_net_watch.py"]

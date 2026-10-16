@@ -1,0 +1,3 @@
+# Runtime dependencies; run.py installs these in the project's isolated venv.
+textual==1.0.0
+psutil==7.2.2

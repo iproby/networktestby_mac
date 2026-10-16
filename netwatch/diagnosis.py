@@ -44,11 +44,16 @@ def assess(s: Snapshot) -> CauseAssessment:
                       ["Все выбранные TCP- и HTTP-проверки завершились неудачно."] +
                       (["Маршрут проходит через VPN/туннель."] if tunnel else []),
                       ["Проверьте VPN, правила доступа и WAN роутера; сравните с другой сетью."])
+    if any(p.captive_portal for p in s.http_probes):
+        return result("degraded", "possible_captive_portal", "Возможна страница входа в сеть.", .6,
+                      ["Контрольный запрос с ожидаемым HTTP 204 получил страницу или перенаправление.",
+                       "Альтернативы: изменение контрольного сервиса или вмешательство прокси."],
+                      ["Проверьте адрес страницы входа и откройте его кнопкой в обзоре."])
     if s.system_dns and not dns:
-        code = "local_dns_failure" if direct else "upstream_dns_failure"
+        code = "local_dns_failure" if direct else "upstream_dns_failure" if s.direct_dns else "dns_unconfirmed"
         return result("degraded", code, "Системное разрешение имён не работает.", .85 if direct else .65,
                       ["Ни одно контрольное имя не разрешилось системным DNS.",
-                       f"Прямой DNS: {direct}/{len(s.direct_dns)} успешных проверок."],
+                       f"Прямой DNS: {direct}/{len(s.direct_dns)} успешных проверок." if s.direct_dns else "Прямой DNS не проверялся; источник сбоя не установлен."],
                       ["Проверьте DNS-серверы, VPN и DNS-фильтры. Сопоставьте ошибки во вкладке «Проверки»."])
     if s.http_probes and not http:
         return result("degraded", "http_layer_failure", "IP/DNS работают, контрольные HTTP(S)-запросы не проходят.", .72,

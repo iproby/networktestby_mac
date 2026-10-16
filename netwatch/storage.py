@@ -26,6 +26,8 @@ class Journal:
         self.enabled = enabled
         self.path = directory / "network-diagnostics.jsonl"
         self.max_bytes = 5_000_000
+        from .history import History
+        self.history = History(directory / "history.sqlite3")
 
     def append(self, event: dict) -> None:
         if not self.enabled:
@@ -39,6 +41,7 @@ class Journal:
             self.path.replace(self.path.with_name(self.path.name + ".1"))
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+        self.history.append(event)
 
     def export(self, report: dict) -> Path:
         destination = self.directory / "reports"
@@ -51,6 +54,8 @@ class Journal:
                 json.dump(report, handle, ensure_ascii=False, indent=2)
                 handle.write("\n")
             temporary.replace(path)
+            from .reports import render_html
+            path.with_suffix(".html").write_text(render_html(report), encoding="utf-8")
         finally:
             temporary.unlink(missing_ok=True)
         return path

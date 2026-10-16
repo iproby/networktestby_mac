@@ -8,6 +8,14 @@ main() {
   case "$ref" in
     *[!a-zA-Z0-9._/-]*|/*|*..*) echo "Некорректный NETWATCH_REF." >&2; return 2 ;;
   esac
+  if [[ -n "${NETWATCH_RELEASE:-}" || "${NETWATCH_ROLLBACK:-0}" == 1 ]]; then
+    work_dir="$(mktemp -d "${TMPDIR:-/tmp}/netwatch-installer.XXXXXXXX")"
+    printf -v cleanup 'rm -rf -- %q' "$work_dir"
+    trap "$cleanup" EXIT
+    curl -fsSL "https://raw.githubusercontent.com/iproby/networktestby_mac/$ref/install-native.sh" -o "$work_dir/install.sh"
+    bash "$work_dir/install.sh" "$@"
+    return $?
+  fi
   python_bin=""
   for candidate in python3 python /opt/homebrew/bin/python3 /usr/local/bin/python3; do
     if command -v "$candidate" >/dev/null 2>&1 &&

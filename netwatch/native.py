@@ -81,7 +81,7 @@ def windows_state(text: str) -> tuple[list[RouteEntry], list[str]]:
     return result, [dns] if isinstance(dns, str) else dns
 
 
-WINDOWS_QUERY = r"""+$ErrorActionPreference = 'Stop'
+WINDOWS_QUERY = r"""$ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding
 $adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue)
 $routes = @(Get-NetRoute -PolicyStore ActiveStore | Where-Object {

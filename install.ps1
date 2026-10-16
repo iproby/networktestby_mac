@@ -6,6 +6,14 @@
     if ($ref -notmatch '^[A-Za-z0-9._/-]+$' -or $ref.StartsWith('/') -or $ref.Contains('..')) {
         throw 'Invalid NETWATCH_REF: use a branch, tag or commit SHA.'
     }
+    if ($env:NETWATCH_RELEASE -or $env:NETWATCH_ROLLBACK -eq '1') {
+        $native = Join-Path ([IO.Path]::GetTempPath()) ('netwatch-native-' + [Guid]::NewGuid().ToString('N') + '.ps1')
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/iproby/networktestby_mac/$ref/install-native.ps1" -OutFile $native
+            & $native @AppArgs
+        } finally { Remove-Item -LiteralPath $native -Force -ErrorAction SilentlyContinue }
+        return
+    }
     $python = $null
     $prefix = @()
     foreach ($name in @('py', 'python', 'python3')) {

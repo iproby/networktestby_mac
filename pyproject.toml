@@ -4,14 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "networktestby-netwatch"
-version = "3.0.0"
+version = "4.0.0"
 description = "Explainable cross-platform network diagnostics with a live terminal dashboard"
 readme = "README.md"
 requires-python = ">=3.9"
-dependencies = ["textual==1.0.0", "psutil==7.2.2"]
+dependencies = ["textual==1.0.0", "psutil==7.2.2", "dnspython==2.7.0", "certifi==2026.7.22", "pyobjc-framework-CoreWLAN>=10.3,<13; sys_platform == 'darwin'"]
 
 [project.optional-dependencies]
 test = ["pytest>=8,<10", "pytest-asyncio>=0.24,<2"]
+build = ["pyinstaller>=6.11,<7"]
 
 [project.scripts]
 netwatch = "netwatch.cli:main"

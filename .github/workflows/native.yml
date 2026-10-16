@@ -1,0 +1,47 @@
+name: native executables
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/netwatch-github-launch]
+    tags: ['v4.*']
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14, macos-15-intel, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e ".[test,build]"
+      - run: python -m pytest -q
+      - run: python scripts/build_native.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: netwatch-${{ matrix.os }}
+          path: |
+            dist/netwatch-*
+          if-no-files-found: error
+  draft-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: netwatch-*
+          merge-multiple: true
+          path: release
+      - name: Create draft for signing and review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" release/* --draft --title "NetWatch $RELEASE_TAG" --notes "Native builds with SHA-256. Unsigned until maintainer completes docs/RELEASING.md. Review and sign macOS/Windows binaries before publishing."

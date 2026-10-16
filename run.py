@@ -26,7 +26,8 @@ def main() -> int:
         if not python.exists():
             print(f"NetWatch · {platform.system()} · создаю изолированную среду…", file=sys.stderr, flush=True)
             venv.EnvBuilder(with_pip=True).create(env)
-        probe = subprocess.run([str(python), "-c", "import textual, psutil"], capture_output=True)
+        probe_code = "import textual, psutil, dns, certifi" + ("; import CoreWLAN" if sys.platform == "darwin" else "")
+        probe = subprocess.run([str(python), "-c", probe_code], capture_output=True)
         if probe.returncode or not marker.exists() or marker.read_text(encoding="utf-8") != requirements:
             print("Устанавливаю зависимости NetWatch…", file=sys.stderr, flush=True)
             subprocess.run([str(python), "-m", "pip", "install", "--disable-pip-version-check",

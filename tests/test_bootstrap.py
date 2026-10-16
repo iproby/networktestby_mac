@@ -92,7 +92,7 @@ def test_unpublished_application_is_reported(tmp_path, source_zip, downloaded, m
     monkeypatch.setenv("NETWATCH_INSTALL_DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("NETWATCH_REF", "main")
     assert bootstrap.main([]) == 2
-    assert "NetWatch 3" in capfd.readouterr().err
+    assert "NetWatch 4" in capfd.readouterr().err
     assert not list((tmp_path / "cache" / "versions").glob(".download-*"))
 
 

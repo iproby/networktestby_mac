@@ -14,6 +14,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from .trust import https_context
+
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -118,6 +120,9 @@ class HttpProbe:
     latency_ms: float | None
     status_code: int | None = None
     error: str | None = None
+    final_url: str | None = None
+    bytes_read: int = 0
+    captive_portal: bool = False
 
 
 @dataclass
@@ -202,14 +207,46 @@ class Snapshot:
     proxy_detected: bool = False
     dns_servers_system: list[str] = field(default_factory=list)
     duration_ms: float = 0.0
+    network_id: str = ""
+    layers: dict = field(default_factory=dict)
+    observations: list[str] = field(default_factory=list)
+    wifi: dict = field(default_factory=dict)
+    system: dict = field(default_factory=dict)
+    baseline: dict = field(default_factory=dict)
 
 
-def run_command(args: list[str], timeout: float = 3.0) -> tuple[int, str, str]:
+def snapshot_from_dict(data: dict) -> Snapshot:
+    """Read v3/v4 snapshots without evaluating content or performing network work."""
+    from dataclasses import fields
+    if not isinstance(data, dict):
+        raise ValueError("Некорректный снимок")
+    result = {f.name: data[f.name] for f in fields(Snapshot) if f.name in data}
+    for name in ("active_default", "local_default"):
+        result[name] = RouteEntry(**result[name]) if result.get(name) else None
+    result["tunnel_defaults"] = [RouteEntry(**value) for value in result.get("tunnel_defaults", [])]
+    result["interface"] = InterfaceInfo(**result["interface"]) if result.get("interface") else None
+    def reach(value):
+        return ReachabilityProbe(**{**value, "attempts": [PortProbe(**a) for a in value.get("attempts", [])]})
+    result["gateway_probe"] = reach(result["gateway_probe"]) if result.get("gateway_probe") else None
+    result["public_probes"] = [reach(value) for value in result.get("public_probes", [])]
+    for name, cls in (("system_dns", DnsProbe), ("direct_dns", DnsProbe), ("http_probes", HttpProbe), ("regional_services", RegionalServiceProbe)):
+        result[name] = [cls(**value) for value in result.get(name, [])]
+    result["cause"] = CauseAssessment(**result["cause"])
+    perf = result.get("performance")
+    if perf:
+        result["performance"] = PerformanceView(**{**perf,
+            "interface_counters": InterfaceCounters(**perf["interface_counters"]) if perf.get("interface_counters") else None,
+            "interface_rates": InterfaceRates(**perf["interface_rates"]) if perf.get("interface_rates") else None,
+            "cloudflare_speed": SpeedTestProbe(**perf["cloudflare_speed"]) if perf.get("cloudflare_speed") else None})
+    return Snapshot(**result)
+
+
+def run_command(args: list[str], timeout: float = 3.0, encoding: str = "utf-8") -> tuple[int, str, str]:
     try:
         completed = subprocess.run(
             args,
             capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
+            text=True, encoding=encoding, errors="replace",
             timeout=timeout,
             check=False,
         )
@@ -472,18 +509,28 @@ def system_dns_lookup(name: str, timeout: float) -> DnsProbe:
     return DnsProbe(server="system", name=name, ok=bool(answers), latency_ms=latency_ms, answer_count=len(answers))
 
 
-def http_probe(url: str, timeout: float) -> HttpProbe:
+def http_probe(url: str, timeout: float, expected_status=None, expected_text=None) -> HttpProbe:
     started = monotonic_ms()
-    request = urllib.request.Request(url, headers={"User-Agent": "NetWatch/3.0"})
+    request = urllib.request.Request(url, headers={"User-Agent": "NetWatch/4.0"})
 
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout, context=https_context()) as response:
             latency_ms = round(monotonic_ms() - started, 1)
+            final_url = response.geturl()
+            body = response.read(4096) if expected_text is not None else b""
+            ok = 200 <= response.status < 400
+            error = None
+            if expected_status is not None and response.status != expected_status:
+                ok, error = False, f"Ожидался HTTP {expected_status}, получен {response.status}"
+            if expected_text is not None and expected_text not in body.decode("utf-8", "replace"):
+                ok, error = False, "Не найден ожидаемый текст в первых 4096 байтах"
             return HttpProbe(
                 url=url,
-                ok=200 <= response.status < 400,
+                ok=ok,
                 latency_ms=latency_ms,
                 status_code=response.status,
+                error=error, final_url=final_url, bytes_read=len(body),
+                captive_portal=expected_status == 204 and 200 <= response.status < 400 and (response.status != 204 or final_url != url),
             )
     except urllib.error.HTTPError as exc:
         latency_ms = round(monotonic_ms() - started, 1)
@@ -513,15 +560,15 @@ def build_speedtest_url(template: str, bytes_count: int) -> str:
     return template
 
 
-def measure_download_speed(url: str, timeout: float, max_bytes: int = 5_000_000) -> SpeedTestProbe:
+def measure_download_speed(url: str, timeout: float, max_bytes: int = 5_000_000, opener=None) -> SpeedTestProbe:
     from urllib.parse import urlsplit
-    request = urllib.request.Request(url, headers={"User-Agent": "NetWatch/3.0", "Accept-Encoding": "identity"})
+    request = urllib.request.Request(url, headers={"User-Agent": "NetWatch/4.0", "Accept-Encoding": "identity"})
     started = time.monotonic()
     transferred = 0
     ttfb = None
     error = None
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with (opener.open(request, timeout=timeout) if opener else urllib.request.urlopen(request, timeout=timeout, context=https_context())) as response:
             ttfb = round((time.monotonic() - started) * 1000, 1)
             while transferred < max_bytes:
                 if time.monotonic() - started >= timeout:

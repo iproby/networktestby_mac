@@ -47,7 +47,7 @@ def archive_url(ref: str) -> str:
 
 def download_archive(url: str, path: Path) -> str:
     digest = hashlib.sha256()
-    request = urllib.request.Request(url, headers={"User-Agent": "NetWatch-Installer/3.0"})
+    request = urllib.request.Request(url, headers={"User-Agent": "NetWatch-Installer/4.0"})
     size = 0
     # urllib uses the platform's normal TLS verification; never bypass it.
     with urllib.request.urlopen(request, timeout=30) as response, path.open("xb") as handle:
@@ -99,7 +99,7 @@ def unpack_archive(archive: Path, destination: Path) -> None:
                 with bundle.open(item) as source, target.open("xb") as output:
                     shutil.copyfileobj(source, output)
     if not all((destination / name).is_file() for name in REQUIRED):
-        raise InstallError("В этой версии GitHub ещё нет полного NetWatch 3. Опубликуйте обновлённый код или выберите NETWATCH_REF.")
+        raise InstallError("В этой версии GitHub ещё нет полного NetWatch 4. Опубликуйте обновлённый код или выберите NETWATCH_REF.")
 
 
 def is_installed(path: Path, digest: str) -> bool:

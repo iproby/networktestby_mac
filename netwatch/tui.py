@@ -4,8 +4,10 @@ from __future__ import annotations
 import asyncio
 import statistics
 import time
+import json
+import sqlite3
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from rich.text import Text
 from textual import on, work
@@ -14,7 +16,7 @@ from textual.binding import Binding
 from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (Button, Checkbox, DataTable, Footer, Header, Input,
-                             Label, Sparkline, Static, TabbedContent, TabPane)
+                             Label, Select, Sparkline, Static, TabbedContent, TabPane)
 
 from .core import Snapshot, format_latency, format_mbps, iso_now
 from .engine import Monitor, incident_duration
@@ -77,11 +79,11 @@ class Help(ModalScreen):
         with VerticalScroll(id="help-dialog"):
             yield Static("NETWATCH / КАК ЧИТАТЬ МОНИТОР", classes="section-title")
             yield Static(
-                "1–5  Переключение вкладок\n"
+                "1–8  Переключение вкладок\n"
                 "R     Проверить сейчас\n"
                 "P     Пауза / продолжить\n"
                 "S     Замерить download (по умолчанию до 5 МБ)\n"
-                "E     Экспортировать JSON-отчёт\n"
+                "E     Экспортировать HTML + JSON-отчёт\n"
                 "Q     Завершить мониторинг\n"
                 "Tab   Перейти к следующему элементу\n"
                 "↑ ↓   Выбрать проверку; Enter — подробности\n\n"
@@ -92,7 +94,7 @@ class Help(ModalScreen):
                 "Регион обозначает принадлежность сервиса, а не местоположение его сервера. "
                 "Ответы 403/429 могут означать ограничение сайта. Диагноз — гипотеза с основаниями.\n\n"
                 "HTTPS проверяется с системным доверием сертификатам. Права администратора не нужны. "
-                "Отчёт и журнал содержат IP-адреса и имена адаптеров: просмотрите их перед отправкой.",
+                "Журнал содержит IP-адреса. Экспорт обезличен по умолчанию: просмотрите его перед отправкой.",
                 markup=False,
             )
             yield Button("Понятно", id="close-help", variant="primary")
@@ -152,6 +154,16 @@ class NetWatchApp(App):
     #settings-actions { height: 3; margin: 1 0; }
     Button { margin-right: 1; }
     #settings-note { color: #8fa8be; }
+    #target-table { height: 9; margin: 1 0; }
+    .controls { height: 3; margin-bottom: 1; }
+    .controls Select { width: 27; }
+    .controls Input { width: 1fr; }
+    .controls Button { min-width: 12; }
+    #tool-output, #history-detail, #comparison-output { height: auto; padding: 1 2; }
+    #history-table { height: 1fr; }
+    #history-detail { height: 9; overflow-y: auto; background: #132235; }
+    #assert-code { width: 12; }
+    #trace-table { height: 12; }
     #help-dialog { width: 76; max-width: 95%; height: auto; max-height: 90%; background: #132235; border: round #78d8f5; padding: 1 3; }
     Help { align: center middle; background: #000000 65%; }
     Help Button { margin-top: 1; }
@@ -170,7 +182,7 @@ class NetWatchApp(App):
         Binding("p", "pause", "Пауза"), Binding("s", "speed", "Скорость"),
         Binding("e", "export", "Отчёт"), Binding("question_mark", "help", "Справка"),
         *[Binding(str(i), f"tab('{name}')", show=False) for i, name in enumerate(
-            ("overview", "probes", "network-tab", "events", "settings"), 1)],
+            ("overview", "probes", "network-tab", "events", "settings", "history-tab", "tools-tab", "comparison-tab"), 1)],
     ]
 
     def __init__(self, monitor: Monitor):
@@ -184,6 +196,11 @@ class NetWatchApp(App):
         self.visible_probes = []
         self.last_storage_warning = None
         self.last_error = None
+        self.archive_rows = []
+        self.target_rows = []
+        self.target_selection = None
+        self.tool_running = False
+        self.tool_stop = False
 
     def ui(self, selector, expected=None):
         return self.screen_stack[0].query_one(selector, expected)
@@ -205,6 +222,7 @@ class NetWatchApp(App):
                             yield Static("Выполняется первый цикл…", id="diagnosis", markup=False)
                             yield Static("После проверки здесь появятся наблюдения, на которых основан диагноз.", id="evidence", markup=False)
                             yield Static("", id="next-step", markup=False)
+                            yield Button("Открыть страницу входа", id="portal-open", disabled=True)
                         with Vertical(id="chain-panel", classes="panel"):
                             yield Static("КОНТРОЛЬНАЯ ЦЕПОЧКА", classes="section-title")
                             yield DataTable(id="chain", cursor_type="row", show_header=False)
@@ -223,11 +241,14 @@ class NetWatchApp(App):
                 with VerticalScroll():
                     yield Static("Данные маршрутов и адаптера появятся после первого цикла.", id="network", markup=False)
             with TabPane("4 События", id="events"):
-                yield Static("Инцидент начинается при замечании или сбое и закрывается после цикла OK. Последние 200; полная история — в JSONL-журнале.", id="events-note", markup=False)
+                yield Static("Инцидент начинается при замечании или сбое и закрывается после цикла OK. Enter на строке — контекст ±5 минут в истории. Последние 200.", id="events-note", markup=False)
                 yield DataTable(id="incident-table", cursor_type="row", zebra_stripes=True)
             with TabPane("5 Настройки", id="settings"):
                 with VerticalScroll():
                     yield Static("РЕЖИМ НАБЛЮДЕНИЯ", classes="section-title")
+                    with Horizontal(classes="controls"):
+                        yield Select([("Общий", "general"), ("Видеозвонки", "calls"), ("Игры", "gaming"), ("VPN", "vpn"), ("Экономия", "economy")], value=self.monitor.settings.profile, allow_blank=False, id="task-profile")
+                        yield Button("Загрузить набор", id="apply-preset")
                     with Vertical(classes="setting"):
                         yield Label("Пауза между циклами, секунд (0.2–3600)")
                         yield Input(str(self.monitor.settings.interval), id="interval-input", type="number")
@@ -237,15 +258,75 @@ class NetWatchApp(App):
                     with Horizontal(id="settings-actions"):
                         yield Button("Применить", id="apply-settings", variant="primary")
                         yield Button("Сохранить профиль", id="save-settings")
+                    yield Checkbox("Локальные уведомления об устойчивых сбоях", self.monitor.settings.notifications, id="notify-enabled")
+                    yield Checkbox("Адаптировать интервал при стабильной сети / питании от батареи", self.monitor.settings.adaptive, id="adaptive-enabled")
+                    with Vertical(classes="setting"):
+                        yield Label("Суточный лимит тестовых загрузок, МБ")
+                        yield Input(str(self.monitor.settings.daily_budget_mb), id="budget-input", type="number")
+                    with Vertical(classes="setting"):
+                        yield Label("Хранить историю, дней (1–30; дополнительно действует лимит размера)")
+                        yield Input(str(self.monitor.settings.history_days), id="retention-input", type="integer")
+                    yield Static("КОНТРОЛЬНЫЕ ТОЧКИ / выберите строку для изменения", classes="section-title")
+                    yield DataTable(id="target-table", cursor_type="row")
+                    with Horizontal(classes="controls"):
+                        yield Select([("HTTP(S)", "http_urls"), ("IP:порт", "public_endpoints"), ("DNS-имя", "dns_names"), ("DNS-сервер", "dns_servers"), ("Регион CODE|Регион|Имя|URL", "regional_services")], value="http_urls", allow_blank=False, id="target-kind")
+                        yield Input(placeholder="URL, IP:порт, имя или региональный сервис", id="target-input")
+                    with Horizontal(classes="controls"):
+                        yield Button("Добавить", id="target-add")
+                        yield Button("Изменить", id="target-edit")
+                        yield Button("Удалить", id="target-remove")
+                    with Horizontal(classes="controls"):
+                        yield Input(placeholder="HTTP-код", id="assert-code", type="integer")
+                        yield Input(placeholder="Ожидаемый текст (необязательно)", id="assert-text")
+                        yield Button("Условие HTTP", id="apply-assertion")
                     yield Static("", id="settings-note", markup=False)
+                    with Horizontal(classes="controls"):
+                        yield Button("В фон", id="background-start")
+                        yield Button("Статус фона", id="background-status")
+                        yield Button("Остановить фон", id="background-stop")
+            with TabPane("6 История", id="history-tab"):
+                with Horizontal(classes="controls"):
+                    yield Select([("Последний час", 1), ("24 часа", 24), ("7 дней", 168)], value=24, allow_blank=False, id="history-range")
+                    yield Button("Обновить архив", id="history-refresh")
+                yield DataTable(id="history-table", cursor_type="row", zebra_stripes=True)
+                yield Static("Выберите снимок. Показаны до 1000 последних записей выбранного периода.", id="history-detail", markup=False)
+            with TabPane("7 Диагностика", id="tools-tab"):
+                with Horizontal(classes="controls"):
+                    from .tools import TOOLS
+                    yield Select([(label, name) for name, label in TOOLS.items()], value="wifi", allow_blank=False, id="tool-select")
+                    yield Input(placeholder="Узел / URL; пусто — цель из профиля", id="tool-target")
+                    yield Button("Запустить", id="run-tool", variant="primary")
+                    yield Button("Остановить", id="stop-tool", disabled=True)
+                yield Checkbox("MTR: повторять трассировку до остановки", False, id="trace-repeat")
+                yield DataTable(id="trace-table", cursor_type="row", zebra_stripes=True)
+                with VerticalScroll():
+                    yield Static("Выберите инструмент. Качество под нагрузкой расходует до двух лимитов speedtest_bytes; трассировка и UDP используют только выбранные цели.", id="tool-output", markup=False)
+            with TabPane("8 Сравнение", id="comparison-tab"):
+                with Horizontal(classes="controls"):
+                    yield Button("Снимок ДО", id="compare-before")
+                    yield Button("Проверить ПОСЛЕ", id="compare-after", variant="primary")
+                with VerticalScroll():
+                    yield Static("Сохраните текущий снимок, переключите VPN или сеть самостоятельно, затем запустите повторную проверку. Маршруты системы приложение не меняет.", id="comparison-output", markup=False)
         yield Footer()
 
     def on_mount(self) -> None:
         self.ui("#probe-table", DataTable).add_columns("Проверка", "Цель / сервис", "Статус", "Время", "Результат")
         self.ui("#chain", DataTable).add_columns("Этап", "Ответ")
         self.ui("#incident-table", DataTable).add_columns("Начало", "Завершение", "Длительность", "Циклы", "Первый диагноз / последний код")
+        self.ui("#target-table", DataTable).add_columns("Тип", "Контрольная точка")
+        self.ui("#history-table", DataTable).add_columns("Время", "Статус", "Адаптер", "Диагноз")
+        self.ui("#trace-table", DataTable).add_columns("TTL", "Адреса", "Средняя RTT", "p95", "Ответы/пробы", "Последний раунд")
+        self.ui("#trace-table", DataTable).display = False
         self.set_class(self.size.width < 100, "compact")
         self.update_settings_note()
+        self.render_targets()
+        if self.monitor.offline:
+            self.paused = True
+            self.title = "NETWATCH / ОФЛАЙН"
+            self.latest = self.monitor.history[-1] if self.monitor.history else None
+            if self.latest:
+                self.render_snapshot()
+        self.refresh_archive()
         self.set_interval(.25, self.tick)
         self.tick()
 
@@ -253,7 +334,12 @@ class NetWatchApp(App):
         self.set_class(self.size.width < 100, "compact")
 
     def tick(self) -> None:
-        if self.paused:
+        # Timers can run during Textual's teardown after children have unmounted.
+        if self._exit or not self.screen_stack or not self.screen_stack[0].query("#session"):
+            return
+        if self.monitor.offline:
+            mode = "ОФЛАЙН / сохранённый отчёт · сетевые операции отключены"
+        elif self.paused:
             mode = "ПАУЗА · данные не обновляются"
         elif self.sampling:
             mode = "ПРОВЕРЯЮ"
@@ -261,7 +347,7 @@ class NetWatchApp(App):
             mode = f"МОНИТОРИНГ · следующий цикл через {max(0, self.next_due - time.monotonic()):.0f} с"
         suffix = f" · снимок {clock(self.latest.timestamp)} · {self.latest.duration_ms / 1000:.1f} с" if self.latest else " · ожидание первого результата"
         self.ui("#session", Static).update(mode + suffix + (f" · ОШИБКА: {self.last_error}" if self.last_error else ""))
-        if not self.paused and not self.sampling and time.monotonic() >= self.next_due:
+        if not self.monitor.offline and not self.paused and not self.sampling and time.monotonic() >= self.next_due:
             self.sampling = True
             self.collect()
 
@@ -283,7 +369,7 @@ class NetWatchApp(App):
             self.notify(f"Цикл не завершён: {exc}", severity="error", timeout=8)
         finally:
             self.sampling = False
-            self.next_due = time.monotonic() + self.monitor.settings.interval
+            self.next_due = time.monotonic() + self.monitor.next_interval()
 
     def render_snapshot(self) -> None:
         s = self.latest
@@ -305,10 +391,13 @@ class NetWatchApp(App):
             f"↓ {format_mbps(rates.rx_mbps)}" if rates else "—",
             f"↑ {format_mbps(rates.tx_mbps)}" if rates else "Нужны два цикла на одном адаптере")
         self.ui("#availability-metric", Metric).show(
-            f"{self.monitor.healthy / self.monitor.total:.0%}", f"{self.monitor.healthy} из {self.monitor.total} · паузы исключены")
+            f"{self.monitor.healthy / max(1, self.monitor.total):.0%}", f"{self.monitor.healthy} из {self.monitor.total} · паузы исключены")
         self.ui("#diagnosis", Static).update(Text(s.cause.summary, style=color))
-        self.ui("#evidence", Static).update("\n".join("• " + item for item in s.cause.evidence))
+        self.ui("#evidence", Static).update("\n".join("• " + item for item in s.cause.evidence + s.observations))
         self.ui("#next-step", Static).update("ДАЛЬШЕ\n" + "\n".join("→ " + item for item in s.cause.next_steps))
+        portal = self.ui("#portal-open", Button)
+        portal.display = any(p.captive_portal for p in s.http_probes)
+        portal.disabled = self.monitor.offline or not portal.display
         table = self.ui("#chain", DataTable)
         table.clear()
         stages = [("Адаптер", [s.interface.status == "active"] if s.interface else []),
@@ -356,6 +445,17 @@ class NetWatchApp(App):
         elif errors or search:
             self.ui("#probe-detail", Static).update("По выбранному фильтру проверок нет.")
 
+    @on(Button.Pressed, "#portal-open")
+    def open_portal(self) -> None:
+        if self.monitor.offline or not self.latest:
+            return
+        from urllib.parse import urlsplit
+        import webbrowser
+        url = next((p.final_url or p.url for p in self.latest.http_probes if p.captive_portal), "")
+        parsed = urlsplit(url)
+        if parsed.scheme in ("http", "https") and parsed.hostname and not parsed.username and not parsed.password:
+            webbrowser.open(url)
+
     def render_network(self) -> None:
         s = self.latest
         def route(r):
@@ -375,6 +475,19 @@ class NetWatchApp(App):
                  "ОГРАНИЧЕНИЯ СБОРА", "", *(s.collection_warnings or ["Системный сбор завершился без предупреждений."]), "",
                  "UDP DNS не подтверждает работу DoH/DoT. VPN без default route может не отображаться.",
                  "Прокси, заданный только в настройках ОС/браузера, может отличаться от прокси окружения."]
+        w, b, system = s.wifi, s.baseline, s.system
+        lines += ["", "WI-FI / НАТИВНЫЕ ДАННЫЕ", f"Источник: {w.get('source', '—')} · {w.get('status', 'не измерялось')}",
+                  f"Сеть: {w.get('ssid') or '—'} · канал: {w.get('channel') or '—'}",
+                  f"RSSI: {w.get('rssi_dbm', '—')} dBm · шум: {w.get('noise_dbm', '—')} dBm · SNR: {w.get('snr_db', '—')} dB",
+                  f"Скорость линка TX: {w.get('tx_mbps', '—')} Мбит/с", w.get('reason') or "",
+                  "", "НОРМА ЭТОЙ СЕТИ", f"Состояние: {b.get('status', '—')} · измерений: {b.get('samples', 0)} / минимум 20",
+                  f"Обычная задержка: {b.get('median_ms', '—')} мс · порог отклонения: {b.get('threshold_ms', '—')} мс",
+                  "", "КОНТЕКСТ УСТРОЙСТВА", f"CPU: {system.get('cpu_percent', '—')}% · память: {system.get('memory_percent', '—')}%",
+                  f"Батарея: {system.get('battery_percent', '—')}% · питание от батареи: {'да' if system.get('on_battery') else 'нет / неизвестно'}",
+                  "", "СЛОИ ПРОВЕРОК"]
+        labels = {"connectivity": "Внешняя связность", "system_dns": "Системный DNS", "direct_dns": "Прямой DNS", "http": "HTTP", "regions": "Сервисы", "gateway": "Шлюз TCP"}
+        states = {"ok": "OK", "failed": "ошибки", "partial": "частично", "unknown": "нет измерений"}
+        lines += [f"{labels.get(key, key)}: {states.get(value['status'], value['status'])} · {value['passed']}/{value['total']}" for key, value in s.layers.items()]
         self.ui("#network", Static).update("\n".join(lines))
 
     def update_speed(self) -> None:
@@ -416,11 +529,16 @@ class NetWatchApp(App):
         self.ui("#tabs", TabbedContent).active = name
 
     def action_refresh_now(self) -> None:
+        if self.monitor.offline:
+            self.notify("Отчёт открыт офлайн")
+            return
         if not self.sampling:
             self.sampling = True
             self.collect()
 
     def action_pause(self) -> None:
+        if self.monitor.offline:
+            return
         self.paused = not self.paused
         if not self.paused:
             self.next_due = 0
@@ -435,11 +553,14 @@ class NetWatchApp(App):
             return
         try:
             path = self.monitor.export()
-            self.notify(f"Отчёт сохранён: {path}", timeout=10)
-        except OSError as exc:
+            self.notify(f"Отчёт JSON + HTML сохранён: {path}", timeout=10)
+        except (OSError, ValueError, sqlite3.Error) as exc:
             self.notify(f"Не удалось сохранить отчёт: {exc}", severity="error")
 
     def action_speed(self) -> None:
+        if self.monitor.offline:
+            self.notify("Отчёт открыт офлайн")
+            return
         if not self.speed_running:
             self.speed_running = True
             self.update_speed()
@@ -463,12 +584,13 @@ class NetWatchApp(App):
             f"Контрольные точки: TCP {len(cfg.public_endpoints)} · имён DNS {len(cfg.dns_names)} · "
             f"DNS-серверов {len(cfg.dns_servers)} · HTTP {len(cfg.http_urls)} · региональных сервисов {len(cfg.regional_services)}.\n\n"
             "Период = длительность проверок + пауза между циклами. R запускает проверку сразу.\n"
-            "Полный профиль целей редактируется в JSON и передаётся через --config.\n\n"
+            "Цели и HTTP-условия редактируются выше; профиль также поддерживает --config.\n\n"
             f"Журнал: {self.monitor.journal.path if self.monitor.journal.enabled else 'отключён'}\n"
-            "Ротация: 5 МБ × 4 файла. На экране хранится до 240 снимков и 200 инцидентов.\n"
+            f"SQLite-архив: до {cfg.history_days} дней / 150 МБ сжатых данных. JSONL: 5 МБ × 4 файла.\n"
             f"Отчёты: {self.monitor.journal.directory / 'reports'}\n\n"
             "Отчёт содержит сетевые адреса и ошибки. Просмотрите файл перед отправкой. "
-            "Секреты из переменных окружения в отчёт не копируются.")
+            "Экспорт E обезличивает адреса и создаёт JSON + автономный HTML.\n\n"
+            + json.dumps(self.monitor.budget.summary(), ensure_ascii=False, indent=2))
 
     @on(Button.Pressed, "#apply-settings")
     def apply_settings(self) -> None:
@@ -476,11 +598,15 @@ class NetWatchApp(App):
         try:
             updated = replace(self.monitor.settings,
                               interval=float(self.ui("#interval-input", Input).value),
-                              timeout=float(self.ui("#timeout-input", Input).value)).validate()
-            if self.sampling or self.speed_running:
+                              timeout=float(self.ui("#timeout-input", Input).value),
+                              daily_budget_mb=float(self.ui("#budget-input", Input).value),
+                              history_days=int(self.ui("#retention-input", Input).value),
+                              notifications=self.ui("#notify-enabled", Checkbox).value,
+                              adaptive=self.ui("#adaptive-enabled", Checkbox).value).validate()
+            if self.sampling or self.speed_running or self.tool_running:
                 self.notify("Дождитесь завершения текущей проверки, затем примените настройки.")
                 return
-            self.monitor.settings = updated
+            self.monitor.set_settings(updated)
             self.next_due = 0
             self.update_settings_note()
             self.notify("Настройки применены к следующим циклам.")
@@ -497,3 +623,273 @@ class NetWatchApp(App):
             self.notify(f"Профиль сохранён: {path}", timeout=10)
         except OSError as exc:
             self.notify(f"Не удалось сохранить профиль: {exc}", severity="error")
+
+    def render_targets(self):
+        table = self.ui("#target-table", DataTable)
+        table.clear()
+        self.target_rows = []
+        for group in ("http_urls", "public_endpoints", "dns_names", "dns_servers", "regional_services"):
+            for index, value in enumerate(getattr(self.monitor.settings, group)):
+                label = "|".join(value) if isinstance(value, (list, tuple)) else value
+                self.target_rows.append((group, index, label))
+                table.add_row(group, Text(label))
+
+    @on(DataTable.RowSelected, "#target-table")
+    def select_target(self, event: DataTable.RowSelected):
+        if 0 <= event.cursor_row < len(self.target_rows):
+            self.target_selection = self.target_rows[event.cursor_row]
+            group, _, value = self.target_selection
+            self.ui("#target-kind", Select).value = group
+            self.ui("#target-input", Input).value = value
+            check = self.monitor.settings.http_assertions.get(value, {}) if group == "http_urls" else {}
+            self.ui("#assert-code", Input).value = str(check.get("status", ""))
+            self.ui("#assert-text", Input).value = check.get("contains", "")
+
+    @on(Button.Pressed, "#target-add")
+    @on(Button.Pressed, "#target-edit")
+    @on(Button.Pressed, "#target-remove")
+    def edit_target(self, event: Button.Pressed):
+        import copy
+        if self.sampling or self.tool_running or self.speed_running:
+            self.notify("Дождитесь завершения текущей проверки")
+            return
+        try:
+            cfg = copy.deepcopy(self.monitor.settings)
+            action = event.button.id
+            group = self.ui("#target-kind", Select).value
+            value = self.ui("#target-input", Input).value.strip()
+            value = value.split("|", 3) if group == "regional_services" else value
+            if action == "target-add":
+                getattr(cfg, group).append(value)
+            else:
+                if not self.target_selection:
+                    raise ValueError("Выберите строку через Enter")
+                original, index, _ = self.target_selection
+                if action == "target-remove":
+                    if original == "http_urls":
+                        cfg.http_assertions.pop(getattr(cfg, original)[index], None)
+                    del getattr(cfg, original)[index]
+                else:
+                    if original != group:
+                        raise ValueError("Для изменения типа удалите старую точку и добавьте новую")
+                    if original == "http_urls":
+                        check = cfg.http_assertions.pop(getattr(cfg, original)[index], None)
+                        if check is not None:
+                            cfg.http_assertions[value] = check
+                    getattr(cfg, group)[index] = value
+            self.monitor.set_settings(cfg.validate())
+            self.target_selection = None
+            self.render_targets()
+            self.update_settings_note()
+            self.notify("Контрольные точки обновлены; сохраните профиль для следующего запуска")
+        except (ValueError, TypeError, IndexError) as exc:
+            self.notify(str(exc), severity="error")
+
+    @on(Button.Pressed, "#apply-assertion")
+    def apply_assertion(self):
+        import copy
+        if self.sampling or self.tool_running or self.speed_running:
+            self.notify("Дождитесь завершения проверки")
+            return
+        try:
+            cfg = copy.deepcopy(self.monitor.settings)
+            url = self.ui("#target-input", Input).value.strip()
+            if url not in cfg.http_urls:
+                raise ValueError("Выберите HTTP-точку")
+            code = self.ui("#assert-code", Input).value
+            text = self.ui("#assert-text", Input).value
+            check = {}
+            if code:
+                check["status"] = int(code)
+            if text:
+                check["contains"] = text
+            cfg.http_assertions[url] = check
+            self.monitor.set_settings(cfg.validate())
+            self.notify("HTTP-условие применено")
+        except ValueError as exc:
+            self.notify(str(exc), severity="error")
+
+    @on(Button.Pressed, "#apply-preset")
+    def apply_preset(self):
+        if self.sampling or self.tool_running or self.speed_running:
+            self.notify("Дождитесь завершения проверки")
+            return
+        cfg = self.monitor.settings.preset(self.ui("#task-profile", Select).value)
+        self.monitor.set_settings(cfg)
+        self.ui("#interval-input", Input).value = str(cfg.interval)
+        self.ui("#timeout-input", Input).value = str(cfg.timeout)
+        self.ui("#budget-input", Input).value = str(cfg.daily_budget_mb)
+        self.render_targets()
+        self.update_settings_note()
+        self.notify("Профиль задачи применён; телеметрия реального звонка/игры не подменяется TCP-проверками")
+
+    @on(Button.Pressed, "#history-refresh")
+    def history_clicked(self):
+        self.refresh_archive()
+
+    @on(DataTable.RowSelected, "#incident-table")
+    def incident_selected(self, event):
+        incidents = list(reversed(self.monitor.incidents))
+        if 0 <= event.cursor_row < len(incidents):
+            self.action_tab("history-tab")
+            self.incident_context(dict(incidents[event.cursor_row]))
+
+    @work(group="archive", exclusive=True)
+    async def incident_context(self, incident):
+        try:
+            if self.monitor.offline or not self.monitor.journal.enabled:
+                start = datetime.fromisoformat(incident["started_at"]) - timedelta(minutes=5)
+                end = datetime.fromisoformat(incident.get("ended_at") or iso_now()) + timedelta(minutes=5)
+                source = self.monitor.offline_archive if self.monitor.offline else self.monitor.history
+                self.archive_rows = [s for s in source if start <= datetime.fromisoformat(s.timestamp) <= end][-1000:]
+            else:
+                from .core import snapshot_from_dict
+                records = await asyncio.to_thread(self.monitor.journal.history.context, incident, limit=1000)
+                self.archive_rows = [snapshot_from_dict(s) for s in records]
+            self.render_archive()
+            self.ui("#history-detail", Static).update(f"Инцидент {incident['started_at']} · контекст ±5 минут · {len(self.archive_rows)} снимков (до 1000). Пробелы означают отсутствие наблюдений.")
+        except Exception as exc:
+            self.notify(f"Контекст недоступен: {exc}", severity="warning")
+
+    def render_archive(self):
+        table = self.ui("#history-table", DataTable)
+        table.clear()
+        for snapshot in self.archive_rows:
+            table.add_row(datetime.fromisoformat(snapshot.timestamp).astimezone().strftime("%d.%m %H:%M:%S"),
+                          snapshot.cause.status, snapshot.interface.name if snapshot.interface else "—", Text(snapshot.cause.summary))
+
+    @work(group="archive", exclusive=True)
+    async def refresh_archive(self):
+        try:
+            hours = int(self.ui("#history-range", Select).value)
+            reference = datetime.fromisoformat(self.monitor.history[-1].timestamp) if self.monitor.offline and self.monitor.history else datetime.now(timezone.utc)
+            since = (reference - timedelta(hours=hours)).isoformat()
+            if self.monitor.offline:
+                self.archive_rows = [s for s in self.monitor.offline_archive if s.timestamp >= since][-1000:]
+            else:
+                from .core import snapshot_from_dict
+                records = await asyncio.to_thread(self.monitor.journal.history.query, since=since, limit=1000)
+                self.archive_rows = [snapshot_from_dict(record["snapshot"]) for record in records]
+            self.render_archive()
+            self.ui("#history-detail", Static).update(f"Снимков: {len(self.archive_rows)}. Выберите строку для разбора; архив ограничен 1000 последними записями периода.")
+        except Exception as exc:
+            self.notify(f"Архив недоступен: {exc}", severity="warning")
+
+    @on(DataTable.RowSelected, "#history-table")
+    @on(DataTable.RowHighlighted, "#history-table")
+    def history_selected(self, event):
+        if 0 <= event.cursor_row < len(self.archive_rows):
+            s = self.archive_rows[event.cursor_row]
+            self.ui("#history-detail", Static).update(s.timestamp + "\n" + s.cause.summary + "\n" +
+                "\n".join("• " + item for item in s.cause.evidence + s.observations) + "\n" +
+                "\n".join("→ " + item for item in s.cause.next_steps))
+
+    @on(Button.Pressed, "#run-tool")
+    def tool_clicked(self):
+        if self.monitor.offline:
+            self.notify("Офлайн-режим: доступны только сохранённые результаты")
+            if self.monitor.diagnostics:
+                from .presentation import diagnostic_text
+                self.ui("#tool-output", Static).update("\n\n".join(diagnostic_text(item) for item in self.monitor.diagnostics))
+            return
+        if self.tool_running:
+            return
+        self.tool_running = True
+        self.tool_stop = False
+        self.ui("#run-tool", Button).disabled = True
+        self.ui("#stop-tool", Button).disabled = self.ui("#tool-select", Select).value != "trace"
+        self.ui("#tool-output", Static).update("Измерение выполняется… остальные вкладки доступны.")
+        self.run_tool(self.ui("#tool-select", Select).value, self.ui("#tool-target", Input).value.strip())
+
+    @on(Button.Pressed, "#stop-tool")
+    def stop_tool(self):
+        self.tool_stop = True
+        self.notify("Остановка после текущей пробы (до 30 секунд)")
+
+    @work(group="diagnostic", exclusive=True)
+    async def run_tool(self, tool, target):
+        from .tools import run
+        from .presentation import diagnostic_text
+        from .measurements import MTRSession
+        try:
+            session = MTRSession()
+            while True:
+                result = await asyncio.to_thread(run, self.monitor, tool, target)
+                table = self.ui("#trace-table", DataTable)
+                table.display = tool == "trace" and bool(result["result"].get("hops"))
+                if table.display:
+                    merged = session.update(result["result"])
+                    result = {**result, "result": merged}
+                    table.clear()
+                    for hop in merged["hops"]:
+                        table.add_row(str(hop["hop"]), Text(", ".join(hop["addresses"]) or "*"), format_latency(hop["average_ms"]),
+                                      format_latency(hop["p95_ms"]), f"{hop['responded']}/{hop['attempts']}", str(hop["last_round"]))
+                self.ui("#tool-output", Static).update(
+                    f"МАРШРУТ / {merged['target']} · раундов: {merged['rounds']}\n\n" + merged["note"] if table.display else diagnostic_text(result))
+                if tool != "trace" or not table.display or self.tool_stop or not self.ui("#trace-repeat", Checkbox).value:
+                    break
+                for _ in range(10):
+                    await asyncio.sleep(.2)
+                    if self.tool_stop:
+                        break
+                if self.tool_stop:
+                    break
+            if tool == "trace" and session.rounds:
+                self.monitor.record_diagnostic("trace", result["result"])
+        except Exception as exc:
+            self.ui("#tool-output", Static).update(f"Измерение не завершено: {exc}")
+        finally:
+            self.tool_running = False
+            self.ui("#run-tool", Button).disabled = False
+            self.ui("#stop-tool", Button).disabled = True
+            self.update_settings_note()
+
+    @on(Button.Pressed, "#compare-before")
+    def capture_before(self):
+        if self.monitor.offline or not self.latest:
+            self.notify("Нужен текущий живой снимок")
+            return
+        self.monitor.comparison_before = asdict(self.latest)
+        self.ui("#comparison-output", Static).update(f"Снимок ДО сохранён: {self.latest.timestamp}\nПереключите VPN/подключение и нажмите «Проверить ПОСЛЕ».")
+
+    @on(Button.Pressed, "#compare-after")
+    def compare_after(self):
+        if self.monitor.offline or self.sampling or self.monitor.comparison_before is None:
+            self.notify("Сначала сохраните снимок ДО и дождитесь завершения текущей проверки")
+            return
+        self.sampling = True
+        self.collect_comparison()
+
+    @work(group="sample", exclusive=True)
+    async def collect_comparison(self):
+        from .insights import compare
+        from .presentation import diagnostic_text
+        try:
+            self.latest = await asyncio.to_thread(self.monitor.sample)
+            self.monitor.accept(self.latest)
+            result = self.monitor.record_diagnostic("comparison", compare(self.monitor.comparison_before, asdict(self.latest)))
+            self.ui("#comparison-output", Static).update(diagnostic_text(result))
+            self.render_snapshot()
+        except Exception as exc:
+            self.notify(str(exc), severity="error")
+        finally:
+            self.sampling = False
+            self.next_due = time.monotonic() + self.monitor.next_interval()
+
+    @on(Button.Pressed, "#background-start")
+    @on(Button.Pressed, "#background-status")
+    @on(Button.Pressed, "#background-stop")
+    def background_clicked(self, event):
+        if self.monitor.offline:
+            self.notify("Офлайн-режим")
+            return
+        self.manage_background(event.button.id.removeprefix("background-"))
+
+    @work(group="background", exclusive=True)
+    async def manage_background(self, action):
+        from .background import manage
+        try:
+            result = await asyncio.to_thread(manage, action, self.monitor.journal.directory, self.monitor.settings)
+            self.notify(json.dumps(result, ensure_ascii=False), timeout=10)
+        except Exception as exc:
+            self.notify(str(exc), severity="error", timeout=10)

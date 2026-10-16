@@ -163,6 +163,7 @@ python3 -m venv .venv
 .venv/bin/python -m pytest -q
 .venv/bin/python -m pip check
 .venv/bin/python scripts/build_native.py
+.venv/bin/python scripts/smoke_native.py dist/netwatch-Linux-x86_64
 ```
 
 Windows использует `.venv\Scripts\python`. Тесты запускают собственные временные HTTP/UDP/TLS/DoH-серверы и проверяют реальные измерения, авторизацию, бюджет, восстановление истории, обезличивание, фон и действия Textual. Публичные сайты для тестов не нужны. CI: три ОС, Python 3.9/3.12; сборки исполняемых файлов — отдельно. Список критериев и проверенных ограничений: [docs/NETWATCH_4.md](docs/NETWATCH_4.md).

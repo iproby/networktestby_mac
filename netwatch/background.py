@@ -82,9 +82,18 @@ def _manage(action, directory, config):
                 running.terminate()
             except psutil.NoSuchProcess:
                 pass
-            try:
-                running.wait(timeout=10)
-            except psutil.TimeoutExpired:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    if not running.is_running() or running.status() == psutil.STATUS_ZOMBIE:
+                        break
+                    running.wait(timeout=min(.2, max(.01, deadline - time.monotonic())))
+                    break
+                except psutil.TimeoutExpired:
+                    continue
+                except psutil.NoSuchProcess:
+                    break
+            if process(directory) is not None:
                 return {"running": True, "reason": "Остановка запрошена; ожидается завершение сетевой операции"}
         (directory / "background.json").unlink(missing_ok=True)
         return {"running": False}

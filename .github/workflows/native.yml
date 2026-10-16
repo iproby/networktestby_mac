@@ -21,6 +21,13 @@ jobs:
       - run: python -m pip install -e ".[test,build]"
       - run: python -m pytest -q
       - run: python scripts/build_native.py
+      - name: Exercise the executable with no Python in its PATH
+        shell: bash
+        run: |
+          for binary in dist/netwatch-*; do
+            case "$binary" in *.sha256) continue ;; esac
+            python scripts/smoke_native.py "$binary"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: netwatch-${{ matrix.os }}
